@@ -5,7 +5,13 @@ import itertools
 
 import torch
 from torch.distributed._tensor import DeviceMesh, distribute_tensor, DTensor
-from torch.distributed._tensor.placement_types import _Partial, Replicate, Shard
+from torch.distributed._tensor.placement_types import (
+    _Partial,
+    DTensorSpec,
+    Replicate,
+    Shard,
+)
+from torch.distributed._tensor.redistribute import redistribute_local_tensor
 
 from torch.testing._internal.common_utils import run_tests
 
@@ -129,11 +135,11 @@ class RedistributeTest(DTensorTestBase):
         )
 
         # test backward to have replicate grad on partial
+        # for from_local backward, we want the replicate() -> partial() to be
+        # pass through.
         global_partial_tensor.backward(torch.ones_like(global_partial_tensor))
         self.assertIsNotNone(partial_local.grad)
-        self.assertEqual(
-            partial_local.grad, torch.ones_like(partial_local) / self.world_size
-        )
+        self.assertEqual(partial_local.grad, torch.ones_like(partial_local))
 
     @with_comms
     def test_replicate_to_partial(self):
@@ -174,6 +180,30 @@ class RedistributeTest(DTensorTestBase):
             replica_tensor.to_local() / self.world_size,
             partial_tensor.to_local(),
         )
+
+        # test backward path for replicate to partial where div should not
+        # be triggered.
+        local_tensor = torch.randn(12, 3, device=self.device_type)
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        partial_spec = DTensorSpec(
+            device_mesh,
+            (_Partial(),),
+        )
+        replica_spec = DTensorSpec(
+            device_mesh,
+            (Replicate(),),
+        )
+
+        out_local_forward = redistribute_local_tensor(
+            local_tensor, replica_spec, partial_spec, is_backward=False
+        )
+        out_local_backward = redistribute_local_tensor(
+            local_tensor, replica_spec, partial_spec, is_backward=True
+        )
+
+        self.assertEqual(local_tensor.size(), out_local_forward.size())
+        self.assertEqual(out_local_backward.size(), out_local_backward.size())
+        self.assertEqual(out_local_backward / self.world_size, out_local_forward)
 
     @with_comms
     def test_partial_to_shard(self):
