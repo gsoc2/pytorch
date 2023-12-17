@@ -33,6 +33,8 @@ struct TORCH_API ProfilingGraphExecutorImpl : public GraphExecutorImplBase {
     remaining_bailout_depth_.reset();
     // TODO - would be nice to have it initialized in subsequent use
     fusion_strategy_ = getFusionStrategy();
+    time_optimized_plan_created_ = 0;
+    is_graph_extra_memory_released_ = false;
   }
 
   bool isOptimized() const override {
@@ -72,6 +74,10 @@ struct TORCH_API ProfilingGraphExecutorImpl : public GraphExecutorImplBase {
   // of the GraphExecutor and only shared with InterpreterState
   std::vector<std::unique_ptr<Function>> fallback_functions_;
   c10::optional<size_t> remaining_bailout_depth_;
+  // The time the optimized_plan_ is created.
+  int32_t time_optimized_plan_created_ = 0;
+  // Has the extra memory used by the graph for profiling is released?
+  bool is_graph_extra_memory_released_ = false;
 };
 
 } // namespace torch::jit

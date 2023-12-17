@@ -35,6 +35,7 @@
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
 #include <torch/csrc/jit/passes/update_differentiable_graph_requires_grad.h>
 #include <torch/csrc/jit/passes/utils/subgraph_utils.h>
+#include <chrono>
 #include <mutex>
 
 C10_DEFINE_bool(
@@ -57,6 +58,16 @@ C10_DEFINE_bool(
     false,
     "fuse on 12 dynamic compilations");
 
+C10_DEFINE_bool(
+    torch_jit_release_profiling_graph_after_optimization,
+    false,
+    "After getOptimizedPlanFor release the optimization record for reduction of memory in inference. This is aggressive memory saving, and please be cautious!");
+
+C10_DEFINE_int32(
+    torch_jit_release_profiling_graph_delay_in_seconds,
+    60,
+    "How long to wait before releasing the profiling graph after optimizaiton is done. Only used if torch_jit_release_profiling_graph_after_optimization is set to true.");
+
 constexpr size_t kDefaultNumProfiledRuns = 1;
 constexpr size_t kDefaultBailoutDepth = 20;
 
@@ -70,6 +81,15 @@ C10_DEFINE_int64(
     "Number of re-specializations");
 
 namespace torch::jit {
+
+namespace {
+int32_t getNowInSecs() {
+  auto currentTimePoint = std::chrono::system_clock::now();
+  auto durationSinceEpoch = std::chrono::duration_cast<std::chrono::seconds>(
+      currentTimePoint.time_since_epoch());
+  return static_cast<int32_t>(durationSinceEpoch.count());
+}
+} // namespace
 
 #if defined(C10_MOBILE)
 static std::atomic<bool> executor_mode{true};
@@ -631,6 +651,13 @@ const ExecutionPlan& ProfilingGraphExecutorImpl::getOptimizedPlanFor(
     runProfilingInsensitiveOptimizations(copy);
     GRAPH_DUMP("Optimized SimpleExecutor Graph: ", copy);
     optimized_plan_ = ExecutionPlan(copy, function_name_);
+    if (FLAGS_torch_jit_release_profiling_graph_after_optimization) {
+      pr_.reset();
+      fallback_functions_.clear();
+      remaining_bailout_depth_.reset();
+      graph.reset();
+      time_optimized_plan_created_ = getNowInSecs();
+    }
     return *optimized_plan_;
   }
 
@@ -665,6 +692,15 @@ const ExecutionPlan& ProfilingGraphExecutorImpl::getOptimizedPlanFor(
   CheckStrictFusion(copy);
   GRAPH_DUMP("Optimized Graph: ", copy);
   optimized_plan_ = ExecutionPlan(copy, function_name_);
+  // We have the optimized plan already, We can clear out the intermediate
+  // objects.
+  if (FLAGS_torch_jit_release_profiling_graph_after_optimization) {
+    pr_.reset();
+    fallback_functions_.clear();
+    remaining_bailout_depth_.reset();
+    graph.reset();
+    time_optimized_plan_created_ = getNowInSecs();
+  }
   return *optimized_plan_;
 }
 
@@ -676,6 +712,16 @@ const ExecutionPlan& ProfilingGraphExecutorImpl::getPlanFor(
   // IMPORTANT: This is a hot path of calling a torchscript function. Try not to
   // add any code above this.
   if (optimized_plan_) {
+    if (FLAGS_torch_jit_release_profiling_graph_after_optimization &&
+        !is_graph_extra_memory_released_) {
+      int32_t now = getNowInSecs();
+      if ((now - time_optimized_plan_created_) >
+          FLAGS_torch_jit_release_profiling_graph_delay_in_seconds) {
+        is_graph_extra_memory_released_ = true;
+        profiling_plan_.reset();
+        fallback_plan_.reset();
+      }
+    }
     return *optimized_plan_;
   }
   // if depth is not set, use
